@@ -1,7 +1,7 @@
 #include "loader.h"
-
-//comment out the line below for loadiine-style memory mapping
-//#define LOADIINE_MEM_MAP 1
+#include "../../../libwiiu/src/vpad.h"
+#define BTN_PRESSED (BUTTON_A | BUTTON_B | BUTTON_HOME)
+#define PRINT_TEXT1(x, y, str) { OSScreenPutFontEx(1, x, y, str); }
 
 void wait(unsigned int t);
 void doBrowserShutdown(unsigned int coreinit_handle);
@@ -295,28 +295,133 @@ void _start()
 	/* Make DRVHAX point to DRVA to ensure a clean exit */
 	kern_write((void*)(drvhax_addr + 0x48), drva_addr);
 
-	//map (mostly unused) memory area to specific MEM2 region
+	//Begin Menu
+	void (*OSScreenInit)();
+        unsigned int (*OSScreenGetBufferSizeEx)(unsigned int bufferNum);
+        unsigned int (*OSScreenSetBufferEx)(unsigned int bufferNum, void * addr);
+        unsigned int (*OSScreenClearBufferEx)(unsigned int bufferNum, unsigned int temp);
+        unsigned int (*OSScreenFlipBuffersEx)(unsigned int bufferNum);
+        unsigned int (*OSScreenPutFontEx)(unsigned int bufferNum, unsigned int posX, unsigned int posY, void * buffer);
+
+        OSDynLoad_FindExport(coreinit_handle, 0, "OSScreenInit", &OSScreenInit);
+        OSDynLoad_FindExport(coreinit_handle, 0, "OSScreenGetBufferSizeEx", &OSScreenGetBufferSizeEx);
+        OSDynLoad_FindExport(coreinit_handle, 0, "OSScreenSetBufferEx", &OSScreenSetBufferEx);
+        OSDynLoad_FindExport(coreinit_handle, 0, "OSScreenClearBufferEx", &OSScreenClearBufferEx);
+        OSDynLoad_FindExport(coreinit_handle, 0, "OSScreenFlipBuffersEx", &OSScreenFlipBuffersEx);
+        OSDynLoad_FindExport(coreinit_handle, 0, "OSScreenPutFontEx", &OSScreenPutFontEx);
+
+        int screen_buf0_size = 0;
+        int screen_buf1_size = 0;
+        uint32_t screen_color = 0; // (r << 24) | (g << 16) | (b << 8) | a;
+        char msg[80];
+
+         // Init screen
+        OSScreenInit();
+
+        // Set screens buffers
+        screen_buf0_size = OSScreenGetBufferSizeEx(0);
+        screen_buf1_size = OSScreenGetBufferSizeEx(1);
+
+        OSScreenSetBufferEx(0, (void *)0xF4000000);
+        OSScreenSetBufferEx(1, (void *)0xF4000000 + screen_buf0_size);
+
+        // Clear screens
+        OSScreenClearBufferEx(0, screen_color);
+        OSScreenClearBufferEx(1, screen_color);
+
+        // Flush the cache
+        DCFlushRange((void *)0xF4000000, screen_buf0_size);
+        DCFlushRange((void *)0xF4000000 + screen_buf0_size, screen_buf1_size);
+
+        // Flip buffers
+        OSScreenFlipBuffersEx(0);
+        OSScreenFlipBuffersEx(1);
+        
+        // Prepare vpad
+        unsigned int vpad_handle;
+        int (*VPADRead)(int controller, VPADData *buffer, unsigned int num, int *error);
+        OSDynLoad_Acquire("vpad.rpl", &vpad_handle);
+        OSDynLoad_FindExport(vpad_handle, 0, "VPADRead", &VPADRead);
+
+        // Set Butons for Kernel Selection
+        int error;
+        uint8_t button_pressed = 1;
+        VPADData vpad_data;
+        VPADRead(0, &vpad_data, 1, &error); //Read initial vpad status
+        while (1)
+        {
+            // Refresh screen if needed
+            if (button_pressed) { OSScreenFlipBuffersEx(1); OSScreenClearBufferEx(1, 0); }
+
+            // Print message
+            PRINT_TEXT1(24, 1, "-- Multi-Kernel --");
+            PRINT_TEXT1(0, 5, "Press A for Normal Kernel");
+            PRINT_TEXT1(0, 6, "Press B for Loadiine Kernel");
+            PRINT_TEXT1(42, 17, "Press Home to Exit");
+
+
+            // Print Stuff
+	    PRINT_TEXT1(0, 10, "       _~");
+            PRINT_TEXT1(0, 11, "    _~ )_)_~");
+            PRINT_TEXT1(0, 12, "    )_))_))_)");
+            PRINT_TEXT1(0, 13, "    _!__!__!_");
+            PRINT_TEXT1(0, 14, ("    \x5c______t/"));
+            PRINT_TEXT1(0, 15, "  ~~~~~~~~~~~~~");
+
+            // Read vpad
+            VPADRead(0, &vpad_data, 1, &error);
+
+            // Update screen
+            if (button_pressed)
+            {
+                OSScreenFlipBuffersEx(1);
+                OSScreenClearBufferEx(1, 0);
+            }
+            // Check for buttons
+            else
+            {
+                // Home Button
+                if (vpad_data.btn_hold & BUTTON_HOME){
+                    goto quit;
+}
+                // A Button
+                if (vpad_data.btn_hold & BUTTON_A) {
 #if (VER<410) //start of region on old FWs
 	kern_write((void*)(KERN_ADDRESS_TBL + (0x12 * 4)), 0x30000000);
-#else //newer FWs use different mappings
-	#ifdef LOADIINE_MEM_MAP //start of region
-		kern_write((void*)(KERN_ADDRESS_TBL + (0x12 * 4)), 0x10000000);
-	#else //only around coreinit region
-		kern_write((void*)(KERN_ADDRESS_TBL + (0x12 * 4)), 0x31000000);
-	#endif
+#else //only around coreinit region
+	kern_write((void*)(KERN_ADDRESS_TBL + (0x12 * 4)), 0x31000000);
 #endif
-	//give that memory area read/write permissions
-	kern_write((void*)(KERN_ADDRESS_TBL + (0x13 * 4)), 0x28305800);
+                    goto finish;
+}
+                if (vpad_data.btn_hold & BUTTON_B) {
+		kern_write((void*)(KERN_ADDRESS_TBL + (0x12 * 4)), 0x10000000);
+                    goto finish;
+}
 
+            }
+
+            // Button pressed ?
+            button_pressed = (vpad_data.btn_hold & BTN_PRESSED) ? 1 : 0;
+        }
+
+	//give that memory area read/write permissions
+	
+quit:
+	printOSScreenMsg("Restarting browser...",2);
+	wait(0x1FFFFFFF);
+	callSysExit(coreinit_handle,SYSSwitchToBrowser);
+	exitOSScreen(coreinit_handle);
+finish:
+	kern_write((void*)(KERN_ADDRESS_TBL + (0x13 * 4)), 0x28305800);
 	printOSScreenMsg("Success! Restarting browser...",2);
 	wait(0x1FFFFFFF);
 	callSysExit(coreinit_handle,SYSSwitchToBrowser);
 	exitOSScreen(coreinit_handle);
 
-after_exploit: ;
+after_exploit: 
 	/* Put stuff here that requires an exploited kernel, 
 	   and it will run the second time you launch this webpage */
-	printOSScreenMsg("Exploit already succeeded! Restarting browser...",1);
+	printOSScreenMsg("Exploit already succeeded! Restarting browser...",2);
 	wait(0x1FFFFFFF);
 	callSysExit(coreinit_handle,SYSSwitchToBrowser);
 	exitOSScreen(coreinit_handle);
